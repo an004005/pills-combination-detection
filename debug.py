@@ -9,6 +9,7 @@ SE1 = np.ones((3, 3), np.uint8)
 SE2 = np.ones((5, 5), np.uint8)
 SE3 = np.ones((13, 13), np.uint8)
 RESIZE_WIDTH = 600
+COSIN45 = 0.7071
 
 
 def type_contour(path):
@@ -112,6 +113,7 @@ def register_pills_image(image_path):
     pills_combination['image'] = copy.deepcopy(tmpl_image)
 
     tmpl_gray = cv2.cvtColor(tmpl_image, cv2.COLOR_BGR2GRAY)
+    # tmpl_binary = binaryImageAdaptiveThresh(tmpl_gray)
     tmpl_binary = binaryImageCanny(tmpl_gray)
     # show(tmpl_binary)
     tmpl_contours, _ = getContours(tmpl_binary)
@@ -151,11 +153,11 @@ def register_pills_image(image_path):
                 pills_combination[type_name].append(i)
 
                 # 확인용
-                # tmp = copy.deepcopy(tmpl_image)
-                # cv2.drawContours(tmp, [contour], 0, [255, 255, 255], 1)
-                # cv2.imshow(pills_combination['name'] + " blob " + str(i) + type_name, tmp)
-                # cv2.waitKey(0)
-                # cv2.destroyAllWindows()
+                tmp = copy.deepcopy(tmpl_image)
+                cv2.drawContours(tmp, [contour], 0, [255, 255, 255], 1)
+                cv2.imshow(pills_combination['name'] + " blob " + str(i) + type_name, tmp)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
 
     return pills_combination
 
@@ -164,26 +166,6 @@ def compare_pill_detail(pill1, pill2):
     return True
 
 
-# def compare_pill(tmpl_pills, user_pills):
-#     result = {}
-#     for i, tmpl_contour in enumerate(tmpl_pills['contours']):
-#         tmpl_image = copy.deepcopy(tmpl_pills['image'])
-#         cv2.drawContours(tmpl_image, [tmpl_contour], 0,  [255, 255, 255], 1)
-#         result[i] = []
-#         for j, user_contour in enumerate(user_pills['contours']):
-#             moment = cv2.matchShapes(tmpl_contour, user_contour, cv2.CONTOURS_MATCH_I3, 0)
-#             if moment > MOMENT_THRESH: # MOMENT_THRESH보다 작으면 같은 모양으로 취급
-#                 continue
-#             # tmpl, user contour index
-#             result[i].append(j)
-#             user_image = copy.deepcopy(user_pills['image'])
-#             cv2.drawContours(user_image, [user_contour], 0,  [255, 255, 255], 1)
-#
-#             cv2.imshow("tmpl" + str(moment), tmpl_image)
-#             cv2.imshow("user" + str(moment), user_image)
-#
-#             cv2.waitKey(0)
-#             cv2.destroyAllWindows()
 def get_type1_radius(contour, center):
     center_x = center[0]
     center_y = center[1]
@@ -262,6 +244,86 @@ def showTypePills(tmpl_pills, user_pills, type_name):
     cv2.destroyAllWindows()
 
 
+# {'type1': {0: [0]}, 'type2': {0: [0]}, 'type3': {0: [0]}}
+
+def color_compare():
+    return False
+
+
+def get_inner_pill_area_hist(hsv_image, min_d, center):
+    center_sqr_len = COSIN45 * min_d * 0.8
+    w = int(center_sqr_len)
+    x = int(center[0] - w)
+    y = int(center[1] - w)
+    cropped = hsv_image[y: y + 2 * w, x: x + 2 * w]
+    hist = cv2.calcHist([cropped], [0, 1], None, [180, 256], [0, 180, 0, 256])
+    hist = cv2.normalize(hist, None, 0, 1, cv2.NORM_MINMAX, -1)
+    return hist
+
+
+def inner_pill_s_vector(hsv_image, min_d, center):
+    center_sqr_len = COSIN45 * min_d * 0.8
+    w = int(center_sqr_len)
+    x = int(center[0] - w)
+    y = int(center[1] - w)
+    cropped = hsv_image[y: y + 2 * w, x: x + 2 * w]
+    H = 0
+    S = 0
+    V = 0
+    l = len(cropped) * len(cropped)
+    for width in cropped:
+        for h, s, v in width:
+            H += h
+            S += s
+            V += v
+    # print(H/l, S/l, V/l)
+    return S/l
+
+def compare_hist(tmpl_hist, user_hist):
+    correlation = cv2.compareHist(tmpl_hist, user_hist, 0)
+    chi_square = cv2.compareHist(tmpl_hist, user_hist, 1)
+    intersection = cv2.compareHist(tmpl_hist, user_hist, 2)
+    bhattacharyya = cv2.compareHist(tmpl_hist, user_hist, 3)
+
+    cnt = 0
+    if correlation > 0.9: cnt += 1
+    if chi_square < 0.1: cnt += 1
+    if intersection > 1.5: cnt += 1
+    if bhattacharyya < 0.3: cnt += 1
+
+    print(cnt)
+
+    return True if cnt >= 3 else False
+
+
+def detail_compare(type_group, tmpl_pills, user_pills):
+    compare_done = set([])  # (tmpl, user)
+    hsv_tmpl_img = cv2.cvtColor(copy.deepcopy(tmpl_pills['image']), cv2.COLOR_BGR2HSV)
+    hsv_user_img = cv2.cvtColor(copy.deepcopy(user_pills['image']), cv2.COLOR_BGR2HSV)
+
+    for type_name, same_group in type_group.items():
+        for tmpl_type_index, user_type_indexes in same_group.items():
+            for user_type_index in user_type_indexes:
+                tmpl_index = tmpl_pills[type_name][tmpl_type_index]
+                user_index = user_pills[type_name][user_type_index]
+
+                if (tmpl_index, user_index) in compare_done:
+                    continue
+                else:
+                    tmpl_center = tmpl_pills['center'][tmpl_index]
+                    tmpl_min_d = tmpl_pills['min_max_size'][tmpl_index][0]
+                    tmpl_s = inner_pill_s_vector(hsv_tmpl_img, tmpl_min_d, tmpl_center)
+
+                    user_center = user_pills['center'][user_index]
+                    user_min_d = user_pills['min_max_size'][user_index][0]
+                    user_s = inner_pill_s_vector(hsv_user_img, user_min_d, user_center)
+
+                    if abs(tmpl_s - user_s) < 5:
+                        compare_done.add((tmpl_index, user_index))
+
+    return compare_done
+
+
 def compare_pills(tmpl_pills, user_pills):
     # 타입별 개수 확인
     check_types = []
@@ -285,11 +347,11 @@ def compare_pills(tmpl_pills, user_pills):
             type_group[type_name] = size_same_group
 
     # 각 타입별 디테일 확인
-    print(type_group)
+    print(type_group)  # 각 pills의 type의 index를 저장한 딕셔너리
+    return detail_compare(type_group, tmpl_pills, user_pills)
+    # return type_group
 
-    return True
 
-
-user_pills1 = register_pills_image("images/user_pills1.jpg")
-user_pills6 = register_pills_image("images/user_pills6.jpg")
-compare_pills(user_pills6, user_pills1)
+tmpl_pills = register_pills_image("images/tmpl_pills.jpg")
+user_pills = register_pills_image("images/user_pills.jpg")
+print(compare_pills(tmpl_pills, user_pills))
